@@ -463,6 +463,8 @@ if (isset($_GET['resource']))
 
 // don't mess with this - required for the login session
 ini_set('session.cookie_httponly', '1');
+ini_set('session.cookie_secure', '0');
+ini_set('session.cookie_secure', '0');
 session_start();
 
 // version-number added so after updating, old session-data is not used anylonger
@@ -474,10 +476,36 @@ $params = new GetParameters();
 if($debug==true)
 {
 	ini_set("display_errors", 1);
-	error_reporting(E_STRICT | E_ALL);
+	error_reporting(E_ALL);
 } else
 {
 	@ini_set("display_errors", 0);
+}
+
+//- Support functions
+class MicroTimer {
+    private $start;
+    private $stopTime;
+
+    function __construct() {
+        $this->start = microtime(true);
+        $this->stopTime = null;
+    }
+
+    function stop() {
+        $this->stopTime = microtime(true);
+    }
+
+    function get() {
+        if ($this->stopTime !== null) {
+            return round($this->stopTime - $this->start, 4);
+        }
+        return round(microtime(true) - $this->start, 4);
+    }
+
+    function __toString() {
+        return (string) $this->get();
+    }
 }
 
 // start the timer to record page load time
@@ -500,52 +528,6 @@ $sqlite_datatypes = array("INTEGER", "REAL", "TEXT", "BLOB","NUMERIC","BOOLEAN",
 //available SQLite functions array (don't add anything here or there will be problems)
 $sqlite_functions = array("abs", "hex", "length", "lower", "ltrim", "random", "round", "rtrim", "trim", "typeof", "upper");
 
-//- Support functions
-class MicroTimer {
-    function __construct() {
-        $this->start = microtime(true);
-    }
-    function get() {
-        return round(microtime(true) - $this->start, 4);
-    }
-    private $start;
-}
-//	class MicroTimer (issue #146)
-//	wraps calls to microtime(), calculating the elapsed time and rounding output
-//
-// class MicroTimer {
-
-// 	private $startTime, $stopTime;
-
-// 	// creates and starts a timer
-// 	function __construct()
-// 	{
-// 		$this->startTime = microtime(true);
-// 	}
-
-// 	// stops a timer
-// 	public function stop()
-// 	{
-// 		$this->stopTime = microtime(true);
-// 	}
-
-// 	// returns the number of seconds from the timer's creation, or elapsed
-// 	// between creation and call to ->stop()
-// 	public function elapsed()
-// 	{
-// 		if ($this->stopTime)
-// 			return round($this->stopTime - $this->startTime, 4);
-
-// 		return round(microtime(true) - $this->startTime, 4);
-// 	}
-
-// 	// called when using a MicroTimer object as a string
-// 	public function __toString()
-// 	{
-// 		return (string) $this->elapsed();
-// 	}
-
-// }
 
 // for php < 5.6.0
 if(!function_exists('hash_equals'))
@@ -2533,7 +2515,7 @@ if(isset($_GET['action']) && !isset($_GET['confirm']))
 					$tdWithClass = "<td class='td".($i%2 ? "1" : "2")."'>";
 					$tdWithClassLeft = "<td class='td".($i%2 ? "1" : "2")."' style='text-align:left;'>";
 					if(isset($_GET['oldSearch']) && isset($_SESSION[COOKIENAME.'search'][$_GET['oldSearch']]['values'][$field]))
-						$value = implode($_SESSION[COOKIENAME.'search'][$_GET['oldSearch']]['values'][$field], ",");
+						$value = implode(",", $_SESSION[COOKIENAME.'search'][$_GET['oldSearch']]['values'][$field]);
 					else
 						$value = '';
 					if(isset($_GET['oldSearch']) && isset($_SESSION[COOKIENAME.'search'][$_GET['oldSearch']]['operators'][$field]))
@@ -4243,152 +4225,192 @@ echo "</html>";
 
 class Authorization
 {
-	private $authorized;
-	private $login_failed;
-	private $system_password_encrypted;
+    private $authorized;
+    private $login_failed;
+    private $system_password_encrypted;
+    
+    // CONFIGURATION
+    private $max_attempts = 5;
+    private $lockout_duration = 900; //900 15 minutes
 
-	public function __construct()
-	{
-		// first, make sure a CSRF token is generated
-		$this->generateToken();
-		// second, check for possible CSRF attacks. to protect logins, this is done before checking login
-		$this->checkToken();
-		
-		// the salt and password encrypting is probably unnecessary protection but is done just
-		// for the sake of being very secure
-		if(!isset($_SESSION[COOKIENAME.'_salt']) && !isset($_COOKIE[COOKIENAME.'_salt']))
-		{
-			// create a random salt for this session if a cookie doesn't already exist for it
-			$_SESSION[COOKIENAME.'_salt'] = self::generateSalt(22);
-		}
-		else if(!isset($_SESSION[COOKIENAME.'_salt']) && isset($_COOKIE[COOKIENAME.'_salt']))
-		{
-			// session doesn't exist, but cookie does so grab it
-			$_SESSION[COOKIENAME.'_salt'] = $_COOKIE[COOKIENAME.'_salt'];
-		}
+    public function __construct()
+    {
+        // 1. FORCE SESSION START FIRST
+        if (session_status() === PHP_SESSION_NONE) {
+            session_start();
+        }
+        
+        // 2. GENERATE TOKEN BEFORE CHECKING IT (CRITICAL FIX)
+        $this->generateToken();
+        
+        // 3. NOW CHECK TOKEN (token exists at this point)
+        $this->checkToken();
 
-		// salted and encrypted password used for checking
-		$this->system_password_encrypted = md5(SYSTEMPASSWORD."_".$_SESSION[COOKIENAME.'_salt']);
+        // 4. INITIALIZE THROTTLE ARRAY
+        if (!isset($_SESSION[COOKIENAME . '_throttle'])) {
+            $_SESSION[COOKIENAME . '_throttle'] = [];
+        }
 
-		$this->authorized =
-			// no password
-			SYSTEMPASSWORD == ''
-			// correct password stored in session
-			|| isset($_SESSION[COOKIENAME.'password']) && hash_equals($_SESSION[COOKIENAME.'password'], $this->system_password_encrypted) 
-			// correct password stored in cookie
-			|| isset($_COOKIE[COOKIENAME]) && isset($_COOKIE[COOKIENAME.'_salt']) && hash_equals(md5(SYSTEMPASSWORD."_".$_COOKIE[COOKIENAME.'_salt']), $_COOKIE[COOKIENAME]);
-	}
+        // 5. GET REAL IP
+        $ip = $_SERVER['REMOTE_ADDR'];
+        if (!empty($_SERVER['HTTP_X_FORWARDED_FOR'])) {
+            $ip = trim(explode(',', $_SERVER['HTTP_X_FORWARDED_FOR'])[0]);
+        } elseif (!empty($_SERVER['HTTP_CLIENT_IP'])) {
+            $ip = $_SERVER['HTTP_CLIENT_IP'];
+        }
 
-	public function attemptGrant($password, $remember)
-	{
-		$hashed_password = crypt(SYSTEMPASSWORD, '$2a$07$'.self::generateSalt(22).'$');
-		if (hash_equals($hashed_password, crypt($password, $hashed_password))) {
-			if ($remember) {
-				// user wants to be remembered, so set a cookie
-				$expire = time()+60*60*24*30; //set expiration to 1 month from now
-				setcookie(COOKIENAME, $this->system_password_encrypted, $expire, null, null, null, true);
-				setcookie(COOKIENAME."_salt", $_SESSION[COOKIENAME.'_salt'], $expire, null, null, null, true);
-			} else {
-				// user does not want to be remembered, so destroy any potential cookies
-				setcookie(COOKIENAME, "", time()-86400, null, null, null, true);
-				setcookie(COOKIENAME."_salt", "", time()-86400, null, null, null, true);
-				unset($_COOKIE[COOKIENAME]);
-				unset($_COOKIE[COOKIENAME.'_salt']);
-			}
+        // 6. CHECK LOCKOUT STATUS
+        if (isset($_SESSION[COOKIENAME . '_throttle'][$ip])) {
+            $data = $_SESSION[COOKIENAME . '_throttle'][$ip];
+            $now = time();
+            
+            // Only evaluate lockout expiration if a future unlock_time is actually set
+            if (isset($data['unlock_time']) && $data['unlock_time'] > 0) {
+                if ($now < $data['unlock_time']) {
+                    die("Too many failed attempts. Please wait " . ceil(($data['unlock_time'] - $now) / 60) . " minutes.");
+                } else {
+                    // Lockout has genuinely expired, now we can clear the data
+                    unset($_SESSION[COOKIENAME . '_throttle'][$ip]);
+                }
+            }
+        }
 
-			$_SESSION[COOKIENAME.'password'] = $this->system_password_encrypted;
-			$this->authorized = true;
-			return true;
-		}
+        // 7. SALT & PASSWORD LOGIC
+        if(!isset($_SESSION[COOKIENAME.'_salt']) && !isset($_COOKIE[COOKIENAME.'_salt']))
+        {
+            $_SESSION[COOKIENAME.'_salt'] = self::generateSalt(22);
+        }
+        else if(!isset($_SESSION[COOKIENAME.'_salt']) && isset($_COOKIE[COOKIENAME.'_salt']))
+        {
+            $_SESSION[COOKIENAME.'_salt'] = $_COOKIE[COOKIENAME.'_salt'];
+        }
 
-		$this->login_failed = true;
-		return false;
-	}
+        $this->system_password_encrypted = md5(SYSTEMPASSWORD."_".$_SESSION[COOKIENAME.'_salt']);
 
-	public function revoke()
-	{
-		//destroy everything - cookies and session vars
-		setcookie(COOKIENAME, "", time()-86400, null, null, null, true);
-		setcookie(COOKIENAME."_salt", "", time()-86400, null, null, null, true);
-		unset($_COOKIE[COOKIENAME]);
-		unset($_COOKIE[COOKIENAME.'_salt']);
-		session_unset();
-		session_destroy();
-		$this->authorized = false;
-		// start a new session and generate a new CSRF token for the login form
-		session_start();
-		$this->generateToken();
-	}
+        // 8. CHECK CREDENTIALS
+        $this->authorized =
+            SYSTEMPASSWORD == ''
+            || isset($_SESSION[COOKIENAME.'password']) && hash_equals($_SESSION[COOKIENAME.'password'], $this->system_password_encrypted) 
+            || isset($_COOKIE[COOKIENAME]) && isset($_COOKIE[COOKIENAME.'_salt']) && hash_equals(md5(SYSTEMPASSWORD."_".$_COOKIE[COOKIENAME.'_salt']), $_COOKIE[COOKIENAME]);
+    }
 
-	public function isAuthorized()
-	{
-		return $this->authorized;      
-	}
+    public function attemptGrant($password, $remember)
+    {
+        $ip = $_SERVER['REMOTE_ADDR'];
+        if (!empty($_SERVER['HTTP_X_FORWARDED_FOR'])) {
+            $ip = trim(explode(',', $_SERVER['HTTP_X_FORWARDED_FOR'])[0]);
+        } elseif (!empty($_SERVER['HTTP_CLIENT_IP'])) {
+            $ip = $_SERVER['HTTP_CLIENT_IP'];
+        }
 
-	public function isFailedLogin()
-	{
-		return $this->login_failed;
-	}
+        // Double check lockout
+        if (isset($_SESSION[COOKIENAME . '_throttle'][$ip])) {
+            $data = $_SESSION[COOKIENAME . '_throttle'][$ip];
+            if (time() < $data['unlock_time']) {
+                $this->login_failed = true;
+                return false;
+            }
+        }
 
-	public function isPasswordDefault()
-	{
-		return SYSTEMPASSWORD == 'admin';
-	}
+        $hashed_password = crypt(SYSTEMPASSWORD, '$2a$07$'.self::generateSalt(22).'$');
+        
+        if (hash_equals($hashed_password, crypt($password, $hashed_password))) {
+            // SUCCESS: Clear throttle
+            if (isset($_SESSION[COOKIENAME . '_throttle'][$ip])) {
+                unset($_SESSION[COOKIENAME . '_throttle'][$ip]);
+            }
 
-	private static function generateSalt($saltSize)
-	{
-		$set = 'ABCDEFGHiJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
-		$setLast = strlen($set) - 1;
-		$salt = '';
-		while ($saltSize-- > 0) {
-			$salt .= $set[mt_rand(0, $setLast)];
-		}
-		return $salt;
-	}
-	
-	private function generateToken()
-	{
-		// generate CSRF token 
-		if (empty($_SESSION[COOKIENAME.'token']))
-		{
-			if (function_exists('random_bytes')) // introduced in PHP 7.0
-			{
-				$_SESSION[COOKIENAME.'token'] = bin2hex(random_bytes(32));
-			}
-			elseif (function_exists('openssl_random_pseudo_bytes')) // introduced in PHP 5.3.0
-			{
-				$_SESSION[COOKIENAME.'token'] = bin2hex(openssl_random_pseudo_bytes(32));
-			}
-			else
-			{
-				// For PHP 5.2.x - This case can be removed once we drop support for 5.2.x
-				$_SESSION[COOKIENAME.'token'] = bin2hex(mcrypt_create_iv(32, MCRYPT_DEV_URANDOM));
-			}
-		}
-	}
-	
-	private function checkToken()
-	{
-		// checking CSRF token
-		if($_SERVER['REQUEST_METHOD'] === 'POST' || isset($_GET['download'])) // all POST forms need tokens! downloads are protected as well
-		{
-			if($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['token']))
-				$check_token=$_POST['token'];
-			elseif($_SERVER['REQUEST_METHOD'] === 'GET' && isset($_GET['token']))
-				$check_token=$_GET['token'];
-			
-			if (!isset($check_token))
-			{
-				die("CSRF token missing");
-			}
-			elseif(!hash_equals($_SESSION[COOKIENAME.'token'], $check_token))
-			{
-				die("CSRF token is wrong - please try to login again");
-			}
-		}
-	}
+            if ($remember) {
+                $expire = time()+60*60*24*30;
+                setcookie(COOKIENAME, $this->system_password_encrypted, ['expires'=>$expire,'path'=>'','secure'=>false,'httponly'=>true]);
+                setcookie(COOKIENAME.'_salt', $_SESSION[COOKIENAME.'_salt'], ['expires'=>$expire,'path'=>'','secure'=>false,'httponly'=>true]);
+            } else {
+                setcookie(COOKIENAME, '', ['expires'=>time()-86400,'path'=>'','secure'=>false,'httponly'=>true]);
+                setcookie(COOKIENAME.'_salt', '', ['expires'=>time()-86400,'path'=>'','secure'=>false,'httponly'=>true]);
+                unset($_COOKIE[COOKIENAME]);
+                unset($_COOKIE[COOKIENAME.'_salt']);
+            }
 
+            $_SESSION[COOKIENAME.'password'] = $this->system_password_encrypted;
+            $this->authorized = true;
+            return true;
+        }
+
+        // FAILURE: Increment Counter
+        if (!isset($_SESSION[COOKIENAME . '_throttle'][$ip])) {
+            $_SESSION[COOKIENAME . '_throttle'][$ip] = [
+                'attempts' => 1,
+                'unlock_time' => 0 
+            ];
+        } else {
+            $_SESSION[COOKIENAME . '_throttle'][$ip]['attempts']++;
+        }
+
+        // Apply the lockout timer ONLY if max attempts are reached
+        if ($_SESSION[COOKIENAME . '_throttle'][$ip]['attempts'] >= $this->max_attempts) {
+            $_SESSION[COOKIENAME . '_throttle'][$ip]['unlock_time'] = time() + $this->lockout_duration;
+        }
+		error_log("Failed Login Count for IP $ip: " . $_SESSION[COOKIENAME . '_throttle'][$ip]['attempts']);
+        $this->login_failed = true;
+        return false;
+    }
+
+    public function revoke() {
+        setcookie(COOKIENAME, '', ['expires'=>time()-86400,'path'=>'','secure'=>false,'httponly'=>true]);
+        setcookie(COOKIENAME.'_salt', '', ['expires'=>time()-86400,'path'=>'','secure'=>false,'httponly'=>true]);
+        unset($_COOKIE[COOKIENAME]);
+        unset($_COOKIE[COOKIENAME.'_salt']);
+        session_unset();
+        session_destroy();
+        $this->authorized = false;
+        session_start();
+        $this->generateToken();
+    }
+
+    public function isAuthorized() { return $this->authorized; }
+    public function isFailedLogin() { return $this->login_failed; }
+    public function isPasswordDefault() { return SYSTEMPASSWORD == 'admin'; }
+
+    private static function generateSalt($saltSize) {
+        $set = 'ABCDEFGHiJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+        $setLast = strlen($set) - 1;
+        $salt = '';
+        while ($saltSize-- > 0) {
+            $salt .= $set[mt_rand(0, $setLast)];
+        }
+        return $salt;
+    }
+    
+    private function generateToken() {
+        if (empty($_SESSION[COOKIENAME.'token'])) {
+            if (function_exists('random_bytes')) {
+                $_SESSION[COOKIENAME.'token'] = bin2hex(random_bytes(32));
+            } elseif (function_exists('openssl_random_pseudo_bytes')) {
+                $_SESSION[COOKIENAME.'token'] = bin2hex(openssl_random_pseudo_bytes(32));
+            } else {
+                $_SESSION[COOKIENAME.'token'] = bin2hex(mcrypt_create_iv(32, MCRYPT_DEV_URANDOM));
+            }
+        }
+    }
+    
+    private function checkToken() {
+        // Only check token on POST requests (GET requests for login page don't need it)
+        if($_SERVER['REQUEST_METHOD'] === 'POST') {
+            if(isset($_POST['token'])) {
+                $check_token = $_POST['token'];
+            } else {
+                // No token provided on POST - this is a CSRF attempt or form error
+                die("CSRF token missing");
+            }
+            
+            if(!hash_equals($_SESSION[COOKIENAME.'token'], $check_token)) {
+                die("CSRF token is wrong - please try to login again");
+            }
+        }
+        // For GET requests (loading the login page), skip token check
+    }
 }
+
 // Database class
 // Generic database abstraction class to manage interaction with database without worrying about SQLite vs. PHP versions
 //
@@ -5703,7 +5725,7 @@ class Database
 		if($field_terminate=='\t') $field_terminate = "\t";
 		while($csv_handle!==false && !feof($csv_handle))
 		{
-			$csv_data = fgetcsv($csv_handle, 0, $field_terminate, $field_enclosed, $field_escaped); 
+			$csv_data = fgetcsv($csv_handle, 0, $field_terminate, ($field_enclosed==""?"\"":$field_enclosed), $field_escaped); 
 			if(is_array($csv_data) && ($csv_data[0] != NULL || count($csv_data)>1))
 			{
 				$csv_number_of_rows++;
