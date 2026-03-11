@@ -76,7 +76,7 @@ $theme = 'phpliteadmin.css';
 $language = 'en';
 
 // set default number of rows. You need to relog after changing the number
-$rowsNum = 30;
+$rowsNum = 100;
 
 // reduce string characters by a number bigger than 10
 $charsNum = 300;
@@ -109,7 +109,7 @@ function leet_text($value)
 $cookie_name = 'pla3412';
 
 //whether or not to put the app in debug mode where errors are outputted
-$debug = true;
+$debug = false;
 
 // the user is allowed to create databases with only these extensions
 $allowed_extensions = array('db','db3','sqlite','sqlite3');
