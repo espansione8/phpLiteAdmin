@@ -11,7 +11,8 @@
 //	   Christopher Kramer (crazy4chrissi@gmail.com, http://en.christosoft.de)
 //	   Ayman Teryaki (http://havalite.com)
 //	   Dreadnaut (dreadnaut@gmail.com, http://dreadnaut.altervista.org)
-//	
+//	Last updated: 2026-03-11
+//  	Developer: Chi thanh Chung (espansione8@gmail.com)
 //	
 //	Copyright (C) 2019, phpLiteAdmin
 //	
@@ -44,7 +45,7 @@
 // Please see https://bitbucket.org/phpliteadmin/public/wiki/Configuration for more details
 
 //password to gain access
-$password = 'check';
+$password = 'OT@check';
 
 //directory relative to this file to search for databases (if false, manually list databases in the $databases variable)
 $directory = '.';
